@@ -54,6 +54,14 @@ impl Responses {
     }
 }
 
+struct State {
+    typeinfo: Option<Statement>,
+    typeinfo_composite: Option<Statement>,
+    typeinfo_enum: Option<Statement>,
+    types: HashMap<Oid, Type>,
+    buf: BytesMut,
+}
+
 /// A cache of type info and prepared statements for fetching type info
 /// (corresponding to the queries in the [prepare](prepare) module).
 #[derive(Default)]
@@ -76,10 +84,8 @@ struct CachedTypeInfo {
 
 pub struct InnerClient {
     sender: mpsc::UnboundedSender<Request>,
-    cached_typeinfo: Mutex<CachedTypeInfo>,
-
-    /// A buffer to use when writing out postgres commands.
-    buffer: Mutex<BytesMut>,
+    state: Mutex<State>,
+    pgbouncer_mode: bool,
 }
 
 impl InnerClient {
@@ -97,27 +103,45 @@ impl InnerClient {
     }
 
     pub fn typeinfo(&self) -> Option<Statement> {
-        self.cached_typeinfo.lock().typeinfo.clone()
+        if self.pgbouncer_mode {
+            None
+        } else {
+            self.state.lock().typeinfo.clone()
+        }
     }
 
     pub fn set_typeinfo(&self, statement: &Statement) {
-        self.cached_typeinfo.lock().typeinfo = Some(statement.clone());
+        if !self.pgbouncer_mode {
+            self.state.lock().typeinfo = Some(statement.clone());
+        }
     }
 
     pub fn typeinfo_composite(&self) -> Option<Statement> {
-        self.cached_typeinfo.lock().typeinfo_composite.clone()
+        if self.pgbouncer_mode {
+            None
+        } else {
+            self.state.lock().typeinfo_composite.clone()
+        }
     }
 
     pub fn set_typeinfo_composite(&self, statement: &Statement) {
-        self.cached_typeinfo.lock().typeinfo_composite = Some(statement.clone());
+        if !self.pgbouncer_mode {
+            self.state.lock().typeinfo_composite = Some(statement.clone());
+        }
     }
 
     pub fn typeinfo_enum(&self) -> Option<Statement> {
-        self.cached_typeinfo.lock().typeinfo_enum.clone()
+        if self.pgbouncer_mode {
+            None
+        } else {
+            self.state.lock().typeinfo_enum.clone()
+        }
     }
 
     pub fn set_typeinfo_enum(&self, statement: &Statement) {
-        self.cached_typeinfo.lock().typeinfo_enum = Some(statement.clone());
+        if !self.pgbouncer_mode {
+            self.state.lock().typeinfo_enum = Some(statement.clone());
+        }
     }
 
     pub fn type_(&self, oid: Oid) -> Option<Type> {
@@ -173,12 +197,19 @@ impl Client {
         ssl_mode: SslMode,
         process_id: i32,
         secret_key: i32,
+        pgbouncer_mode: bool,
     ) -> Client {
         Client {
             inner: Arc::new(InnerClient {
                 sender,
-                cached_typeinfo: Default::default(),
-                buffer: Default::default(),
+                state: Mutex::new(State {
+                    typeinfo: None,
+                    typeinfo_composite: None,
+                    typeinfo_enum: None,
+                    types: HashMap::new(),
+                    buf: BytesMut::new(),
+                }),
+                pgbouncer_mode,
             }),
             #[cfg(feature = "runtime")]
             socket_config: None,
