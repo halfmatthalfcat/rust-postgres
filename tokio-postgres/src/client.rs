@@ -80,6 +80,7 @@ pub struct InnerClient {
 
     /// A buffer to use when writing out postgres commands.
     buffer: Mutex<BytesMut>,
+    pgbouncer_mode: bool,
 }
 
 impl InnerClient {
@@ -97,27 +98,45 @@ impl InnerClient {
     }
 
     pub fn typeinfo(&self) -> Option<Statement> {
-        self.cached_typeinfo.lock().typeinfo.clone()
+       if self.pgbouncer_mode {
+           None
+       } else {
+           self.cached_typeinfo.lock().typeinfo.clone()
+       }
     }
 
     pub fn set_typeinfo(&self, statement: &Statement) {
-        self.cached_typeinfo.lock().typeinfo = Some(statement.clone());
+        if !self.pgbouncer_mode {
+            self.cached_typeinfo.lock().typeinfo = Some(statement.clone());
+        }
     }
 
     pub fn typeinfo_composite(&self) -> Option<Statement> {
-        self.cached_typeinfo.lock().typeinfo_composite.clone()
+        if self.pgbouncer_mode {
+            None
+        } else {
+            self.cached_typeinfo.lock().typeinfo_composite.clone()
+        }
     }
 
     pub fn set_typeinfo_composite(&self, statement: &Statement) {
-        self.cached_typeinfo.lock().typeinfo_composite = Some(statement.clone());
+        if !self.pgbouncer_mode {
+            self.cached_typeinfo.lock().typeinfo_composite = Some(statement.clone());
+        }
     }
 
     pub fn typeinfo_enum(&self) -> Option<Statement> {
-        self.cached_typeinfo.lock().typeinfo_enum.clone()
+        if self.pgbouncer_mode {
+            self.cached_typeinfo.lock().typeinfo_enum.clone()
+        } else {
+            None
+        }
     }
 
     pub fn set_typeinfo_enum(&self, statement: &Statement) {
-        self.cached_typeinfo.lock().typeinfo_enum = Some(statement.clone());
+        if !self.pgbouncer_mode {
+            self.cached_typeinfo.lock().typeinfo_enum = Some(statement.clone());
+        }
     }
 
     pub fn type_(&self, oid: Oid) -> Option<Type> {
@@ -173,12 +192,14 @@ impl Client {
         ssl_mode: SslMode,
         process_id: i32,
         secret_key: i32,
+        pgbouncer_mode: bool,
     ) -> Client {
         Client {
             inner: Arc::new(InnerClient {
                 sender,
                 cached_typeinfo: Default::default(),
                 buffer: Default::default(),
+                pgbouncer_mode,
             }),
             #[cfg(feature = "runtime")]
             socket_config: None,
