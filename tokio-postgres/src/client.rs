@@ -1,4 +1,4 @@
-use crate::codec::{BackendMessages, FrontendMessage};
+use crate::codec::BackendMessages;
 use crate::config::{Host, SslMode};
 use crate::connection::{Request, RequestMessages};
 use crate::copy_out::CopyOutStream;
@@ -19,7 +19,7 @@ use fallible_iterator::FallibleIterator;
 use futures::channel::mpsc;
 use futures::{future, pin_mut, ready, StreamExt, TryStreamExt};
 use parking_lot::Mutex;
-use postgres_protocol::message::{backend::Message, frontend};
+use postgres_protocol::message::backend::Message;
 use postgres_types::BorrowToSql;
 use std::collections::HashMap;
 use std::fmt;
@@ -60,26 +60,6 @@ struct State {
     typeinfo_enum: Option<Statement>,
     types: HashMap<Oid, Type>,
     buf: BytesMut,
-}
-
-/// A cache of type info and prepared statements for fetching type info
-/// (corresponding to the queries in the [prepare](prepare) module).
-#[derive(Default)]
-struct CachedTypeInfo {
-    /// A statement for basic information for a type from its
-    /// OID. Corresponds to [TYPEINFO_QUERY](prepare::TYPEINFO_QUERY) (or its
-    /// fallback).
-    typeinfo: Option<Statement>,
-    /// A statement for getting information for a composite type from its OID.
-    /// Corresponds to [TYPEINFO_QUERY](prepare::TYPEINFO_COMPOSITE_QUERY).
-    typeinfo_composite: Option<Statement>,
-    /// A statement for getting information for a composite type from its OID.
-    /// Corresponds to [TYPEINFO_QUERY](prepare::TYPEINFO_COMPOSITE_QUERY) (or
-    /// its fallback).
-    typeinfo_enum: Option<Statement>,
-
-    /// Cache of types already looked up.
-    types: HashMap<Oid, Type>,
 }
 
 pub struct InnerClient {
@@ -145,26 +125,24 @@ impl InnerClient {
     }
 
     pub fn type_(&self, oid: Oid) -> Option<Type> {
-        self.cached_typeinfo.lock().types.get(&oid).cloned()
+        self.state.lock().types.get(&oid).cloned()
     }
 
     pub fn set_type(&self, oid: Oid, type_: &Type) {
-        self.cached_typeinfo.lock().types.insert(oid, type_.clone());
+        self.state.lock().types.insert(oid, type_.clone());
     }
 
     pub fn clear_type_cache(&self) {
-        self.cached_typeinfo.lock().types.clear();
+        self.state.lock().types.clear();
     }
 
-    /// Call the given function with a buffer to be used when writing out
-    /// postgres commands.
     pub fn with_buf<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&mut BytesMut) -> R,
+        where
+            F: FnOnce(&mut BytesMut) -> R,
     {
-        let mut buffer = self.buffer.lock();
-        let r = f(&mut buffer);
-        buffer.clear();
+        let mut state = self.state.lock();
+        let r = f(&mut state.buf);
+        state.buf.clear();
         r
     }
 }
@@ -265,8 +243,8 @@ impl Client {
         statement: &T,
         params: &[&(dyn ToSql + Sync)],
     ) -> Result<Vec<Row>, Error>
-    where
-        T: ?Sized + ToStatement,
+        where
+            T: ?Sized + ToStatement,
     {
         self.query_raw(statement, slice_iter(params))
             .await?
@@ -293,8 +271,8 @@ impl Client {
         statement: &T,
         params: &[&(dyn ToSql + Sync)],
     ) -> Result<Row, Error>
-    where
-        T: ?Sized + ToStatement,
+        where
+            T: ?Sized + ToStatement,
     {
         let stream = self.query_raw(statement, slice_iter(params)).await?;
         pin_mut!(stream);
@@ -330,8 +308,8 @@ impl Client {
         statement: &T,
         params: &[&(dyn ToSql + Sync)],
     ) -> Result<Option<Row>, Error>
-    where
-        T: ?Sized + ToStatement,
+        where
+            T: ?Sized + ToStatement,
     {
         let stream = self.query_raw(statement, slice_iter(params)).await?;
         pin_mut!(stream);
@@ -388,11 +366,11 @@ impl Client {
     /// # }
     /// ```
     pub async fn query_raw<T, P, I>(&self, statement: &T, params: I) -> Result<RowStream, Error>
-    where
-        T: ?Sized + ToStatement,
-        P: BorrowToSql,
-        I: IntoIterator<Item = P>,
-        I::IntoIter: ExactSizeIterator,
+        where
+            T: ?Sized + ToStatement,
+            P: BorrowToSql,
+            I: IntoIterator<Item = P>,
+            I::IntoIter: ExactSizeIterator,
     {
         let statement = statement.__convert().into_statement(self).await?;
         query::query(&self.inner, statement, params).await
@@ -417,8 +395,8 @@ impl Client {
         statement: &T,
         params: &[&(dyn ToSql + Sync)],
     ) -> Result<u64, Error>
-    where
-        T: ?Sized + ToStatement,
+        where
+            T: ?Sized + ToStatement,
     {
         self.execute_raw(statement, slice_iter(params)).await
     }
@@ -438,11 +416,11 @@ impl Client {
     ///
     /// [`execute`]: #method.execute
     pub async fn execute_raw<T, P, I>(&self, statement: &T, params: I) -> Result<u64, Error>
-    where
-        T: ?Sized + ToStatement,
-        P: BorrowToSql,
-        I: IntoIterator<Item = P>,
-        I::IntoIter: ExactSizeIterator,
+        where
+            T: ?Sized + ToStatement,
+            P: BorrowToSql,
+            I: IntoIterator<Item = P>,
+            I::IntoIter: ExactSizeIterator,
     {
         let statement = statement.__convert().into_statement(self).await?;
         query::execute(self.inner(), statement, params).await
@@ -457,9 +435,9 @@ impl Client {
     ///
     /// Panics if the statement contains parameters.
     pub async fn copy_in<T, U>(&self, statement: &T) -> Result<CopyInSink<U>, Error>
-    where
-        T: ?Sized + ToStatement,
-        U: Buf + 'static + Send,
+        where
+            T: ?Sized + ToStatement,
+            U: Buf + 'static + Send,
     {
         let statement = statement.__convert().into_statement(self).await?;
         copy_in::copy_in(self.inner(), statement).await
@@ -473,8 +451,8 @@ impl Client {
     ///
     /// Panics if the statement contains parameters.
     pub async fn copy_out<T>(&self, statement: &T) -> Result<CopyOutStream, Error>
-    where
-        T: ?Sized + ToStatement,
+        where
+            T: ?Sized + ToStatement,
     {
         let statement = statement.__convert().into_statement(self).await?;
         copy_out::copy_out(self.inner(), statement).await
@@ -519,42 +497,7 @@ impl Client {
     ///
     /// The transaction will roll back by default - use the `commit` method to commit it.
     pub async fn transaction(&mut self) -> Result<Transaction<'_>, Error> {
-        struct RollbackIfNotDone<'me> {
-            client: &'me Client,
-            done: bool,
-        }
-
-        impl<'a> Drop for RollbackIfNotDone<'a> {
-            fn drop(&mut self) {
-                if self.done {
-                    return;
-                }
-
-                let buf = self.client.inner().with_buf(|buf| {
-                    frontend::query("ROLLBACK", buf).unwrap();
-                    buf.split().freeze()
-                });
-                let _ = self
-                    .client
-                    .inner()
-                    .send(RequestMessages::Single(FrontendMessage::Raw(buf)));
-            }
-        }
-
-        // This is done, as `Future` created by this method can be dropped after
-        // `RequestMessages` is synchronously send to the `Connection` by
-        // `batch_execute()`, but before `Responses` is asynchronously polled to
-        // completion. In that case `Transaction` won't be created and thus
-        // won't be rolled back.
-        {
-            let mut cleaner = RollbackIfNotDone {
-                client: self,
-                done: false,
-            };
-            self.batch_execute("BEGIN").await?;
-            cleaner.done = true;
-        }
-
+        self.batch_execute("BEGIN").await?;
         Ok(Transaction::new(self))
     }
 
@@ -587,8 +530,8 @@ impl Client {
     #[cfg(feature = "runtime")]
     #[deprecated(since = "0.6.0", note = "use Client::cancel_token() instead")]
     pub async fn cancel_query<T>(&self, tls: T) -> Result<(), Error>
-    where
-        T: MakeTlsConnect<Socket>,
+        where
+            T: MakeTlsConnect<Socket>,
     {
         self.cancel_token().cancel_query(tls).await
     }
@@ -597,9 +540,9 @@ impl Client {
     /// connection itself.
     #[deprecated(since = "0.6.0", note = "use Client::cancel_token() instead")]
     pub async fn cancel_query_raw<S, T>(&self, stream: S, tls: T) -> Result<(), Error>
-    where
-        S: AsyncRead + AsyncWrite + Unpin,
-        T: TlsConnect<S>,
+        where
+            S: AsyncRead + AsyncWrite + Unpin,
+            T: TlsConnect<S>,
     {
         self.cancel_token().cancel_query_raw(stream, tls).await
     }
